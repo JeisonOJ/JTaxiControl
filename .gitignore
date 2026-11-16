@@ -1,0 +1,54 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins*
+.pub/
+.pub-cache/
+build/
+coverage/
+*.iml
+.idea/
+.vscode/
+.widget_preview/
+# Android local state, generated files, and signing material
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/captures/
+android/key.properties
+**/GeneratedPluginRegistrant.java
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+# Configuration: only reviewed examples belong in Git
+.env
+.env.*
+!.env.example
+config/*
+!config/supabase.example.json
+# Supabase local tooling state and database dumps
+supabase/.temp/
+supabase/.branches/
+*.dump
+*.backup
+*.db
+*.sqlite*
+# Runtime/output files (never publish records or local session state)
+work/
+outputs/
+node_modules/
+launcher-web/web/
+launcher-web/web-files.json
+launcher-web/server-state.json
+launcher-web/*.vbs
+__pycache__/
+*.pyc
+*.log
+*.apk
+*.aab
+*.zip
+*.lnk
+.DS_Store
+Thumbs.db

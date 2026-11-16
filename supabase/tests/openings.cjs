@@ -1,0 +1,71 @@
+const {PGlite}=require('@electric-sql/pglite');
+const fs=require('node:fs'),assert=require('node:assert/strict');
+(async()=>{const db=new PGlite();try{
+ await db.exec(`create role anon;create role authenticated;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema auth to public;grant execute on function auth.uid() to public;`);
+ await db.exec(fs.readFileSync('supabase/migrations/202611160001_initial.sql','utf8'));await db.exec(fs.readFileSync('supabase/migrations/202611160003_finances.sql','utf8'));
+ const user='11111111-1111-4111-8111-111111111111';await db.query('insert into auth.users values($1)',[user]);await db.query('insert into private.app_users values($1,1)',[user]);
+ const login=async()=>{await db.query("select set_config('request.jwt.claim.sub',$1,false)",[user]);await db.exec('set role authenticated');};
+ const clock=async(day)=>{await db.exec(`reset role;create or replace function private.today() returns date language sql stable as $$select date '${day}'$$;`);await login();};
+ await db.exec(fs.readFileSync('supabase/migrations/202611160004_opening_balances.sql','utf8'));await clock('2026-11-16');
+ let seq=10;const id=()=>`44444444-4444-4444-8444-${String(seq++).padStart(12,'0')}`;
+ const fail=async(fn)=>{let failed=false;try{await fn()}catch(e){failed=true;}assert(failed);};
+ await db.exec("select public.save_taxi(1::smallint,'OPEN-1');select public.save_taxi(2::smallint,'OPEN-2')");
+ const taxis=(await db.query('select * from public.taxis order by slot')).rows;const [t1,t2]=taxis.map(t=>t.id);
+ const dash=async(month='2026-11-01')=>(await db.query('select public.finance_dashboard($1) d',[month])).rows[0].d;
+ const summary=async(taxi,month)=>(await dash(month)).summaries.find(t=>t.id===taxi);
+ assert.equal(Number((await summary(t1)).fund),0);assert.equal((await summary(t1)).can_initialize,true);
+ const init=(token,taxi,day,cash,debt)=>db.query('select public.initialize_taxi($1,$2,$3,$4,$5)',[token,taxi,day,cash,debt]);
+ const token=id();await init(token,t1,'2026-11-01',50000,100000);await init(token,t1,'2026-11-01',50000,100000);
+ await fail(()=>init(id(),t1,'2026-11-01',50000,100000));await fail(()=>init(token,t1,'2026-11-01',60000,100000));
+ let s=await summary(t1);assert.equal(Number(s.fund),50000);assert.equal(Number(s.owner_debt),100000);assert.equal(Number(s.income),0);assert.equal(Number(s.expenses),0);
+ assert.equal(Number((await summary(t1,'2026-10-01')).fund),0);assert.equal(Number((await summary(t1,'2026-10-01')).owner_debt),0);
+ assert.equal(Number((await summary(t2)).fund),0);assert.equal(Number((await summary(t2)).owner_debt),0);
+ const driver=(await db.query("select public.save_driver(null,'OPEN DRIVER','') id")).rows[0].id;
+ const a=(await db.query("select public.assign_driver($1,$2,'2026-11-16','fixed',90000,array[1,2,3,4,5,6,7]) id",[t1,driver])).rows[0].id;
+ const payment=id();await db.query("select public.record_payment($1,$2,90000,'2026-11-16','OPEN TEST')",[payment,a]);
+ s=await summary(t1);assert.equal(Number(s.fund),140000);assert.equal(Number(s.owner_debt),100000);assert.equal(Number(s.income),90000);
+ const move=(taxi,kind,amount,day)=>db.query("select public.record_finance($1,$2,$3,$4,$5,'other','OPEN TEST',null)",[id(),taxi,kind,amount,day]);
+ await move(t1,'expense',120000,'2026-11-16');await move(t1,'repayment',20000,'2026-11-16');
+ s=await summary(t1);assert.equal(Number(s.fund),0);assert.equal(Number(s.owner_debt),80000);assert.equal(Number(s.income)-Number(s.expenses),-30000);
+ await fail(()=>move(t1,'repayment',1,'2026-11-16'));
+ // Future cash cannot fund earlier deficits, even with opening cash included.
+ await move(t1,'advance',100000,'2026-11-16');
+ await fail(()=>move(t1,'expense',50001,'2026-11-02'));
+ await fail(()=>move(t1,'expense',1,'2026-10-31'));
+ const repay=id();await db.query("select public.record_finance($1,$2,'repayment',10000,'2026-11-02','other','OPEN TEST',null)",[repay,t1]);
+ assert.equal(Number((await summary(t1)).owner_debt),170000);
+ // Each balance is independently configurable, with no artificial movements.
+ await db.exec('begin');await init(id(),t2,'2026-11-16',0,50000);
+ assert.equal(Number((await summary(t2)).fund),0);assert.equal(Number((await summary(t2)).owner_debt),50000);
+ await fail(()=>move(t2,'repayment',1,'2026-11-16'));await db.exec('rollback');
+ await db.exec('begin');await init(id(),t2,'2026-11-16',50000,0);
+ await fail(()=>move(t2,'repayment',1,'2026-11-16'));await db.exec('rollback');
+ await db.exec('begin');await move(t2,'advance',1,'2026-11-16');await fail(()=>init(id(),t2,'2026-11-16',0,0));await db.exec('rollback');
+ await db.exec('begin');
+ const flexDriver=(await db.query("select public.save_driver(null,'FLEX OPEN','') id")).rows[0].id;
+ const flex=(await db.query("select public.assign_driver($1,$2,'2026-11-16','flexible',0,array[1]) id",[t2,flexDriver])).rows[0].id;
+ await db.query("select public.record_payment($1,$2,100,'2026-11-16','TEST')",[id(),flex]);
+ await fail(()=>init(id(),t2,'2026-11-16',0,0));await db.exec('rollback');
+ // A previously created assignment cannot bypass the opening date using a later payment.
+ await db.exec('begin');
+ const earlyDriver=(await db.query("select public.save_driver(null,'EARLY OPEN','') id")).rows[0].id;
+ const early=(await db.query("select public.assign_driver($1,$2,'2026-11-16','flexible',0,array[1]) id",[t2,earlyDriver])).rows[0].id;
+ await clock('2026-11-18');await init(id(),t2,'2026-11-18',0,0);
+ await fail(()=>db.query("select public.record_payment($1,$2,100,'2026-11-16','TEST')",[id(),early]));
+ await db.exec('rollback');await clock('2026-11-16');
+ await init(id(),t2,'2026-11-16',0,0);await fail(()=>move(t2,'repayment',1,'2026-11-16'));
+ await fail(()=>move(t2,'expense',1,'2026-11-16'));
+ await fail(()=>init(id(),t1,'2026-11-16',0,0));
+ await clock('2026-12-01');s=await summary(t1,'2026-12-01');assert.equal(Number(s.fund),90000);assert.equal(Number(s.owner_debt),170000);assert.equal(Number(s.income),0);assert.equal(Number(s.expenses),0);
+ await db.exec('reset role;set role anon');await fail(()=>db.query('select * from public.taxi_openings'));await fail(()=>init(id(),t2,'2026-11-16',0,0));
+ await login();await fail(()=>db.query('update public.taxi_openings set cash=999 where taxi_id=$1',[t1]));
+ assert.equal((await db.query('select * from public.taxi_openings')).rows.length,2);
+ await db.exec('reset role');
+ const outsider='55555555-5555-4555-8555-555555555555';await db.query('insert into auth.users values($1)',[outsider]);await db.query("select set_config('request.jwt.claim.sub',$1,false)",[outsider]);await db.exec('set role authenticated');
+ assert.equal((await db.query('select * from public.taxi_openings')).rows.length,0);await fail(()=>init(id(),t2,'2026-11-16',0,0));
+ await db.exec('reset role');
+ for(const fn of ['public.initialize_taxi(uuid,uuid,date,bigint,bigint)','public.record_payment(uuid,uuid,bigint,date,text)','public.record_finance(uuid,uuid,text,bigint,date,text,text,uuid)','public.finance_dashboard(date)']){
+ const p=(await db.query("select has_function_privilege('anon',$1,'execute') anon,has_function_privilege('authenticated',$1,'execute') member",[fn])).rows[0];assert(!p.anon);assert(p.member);
+ }
+ console.log('PASS openings: zero defaults, independent balances, monthly exclusion/carry-forward, payments do not repay owner, expenses/repayments, date and historical prefixes, duplicate initialization, RLS and direct-write denial.');
+}finally{await db.close();}})().catch(e=>{console.error(e);process.exit(1)});

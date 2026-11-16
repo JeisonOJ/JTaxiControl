@@ -1,0 +1,1 @@
+{"name":"jtaxi-control-local-tests","private":true,"scripts":{"test:db":"node supabase/tests/database.cjs && node supabase/tests/openings.cjs && node supabase/tests/cancellation.cjs"},"devDependencies":{"@electric-sql/pglite":"0.5.16"}}
